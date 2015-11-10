@@ -4,8 +4,9 @@
 
 import codecs
 import os.path
-import sys
+
 from setuptools import setup, find_packages
+
 from rubymarshal import __version__ as version
 
 with codecs.open(os.path.join(os.path.dirname(__file__), 'README.md'), encoding='utf-8') as fd:
@@ -18,7 +19,7 @@ setup(
     long_description=long_description,
     author='Matthieu Gallet',
     author_email='python-dev@19pouces.net',
-    license='CeCILL-B',
+    license='WTFPL',
     url='https://github.com/d9pouces/RubyMarshal',
     packages=find_packages(),
     include_package_data=True,
