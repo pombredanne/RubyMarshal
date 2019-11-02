@@ -1,30 +1,71 @@
-# -*- coding: utf-8 -*-
-from __future__ import unicode_literals
-import re
 import io
-from rubymarshal.classes import UsrMarshal, Symbol, UserDef, Extended, Object, Module
+import re
 
-from rubymarshal.constants import TYPE_NIL, TYPE_TRUE, TYPE_FALSE, TYPE_FIXNUM, TYPE_IVAR, TYPE_STRING, TYPE_SYMBOL, TYPE_ARRAY, TYPE_HASH, \
-    TYPE_FLOAT, TYPE_BIGNUM, TYPE_REGEXP, TYPE_USRMARSHAL, \
-    TYPE_SYMLINK, TYPE_LINK, TYPE_DATA, TYPE_OBJECT, TYPE_STRUCT, TYPE_MODULE, TYPE_CLASS, TYPE_USERDEF, TYPE_EXTENDED
+from rubymarshal.classes import (
+    UsrMarshal,
+    Symbol,
+    UserDef,
+    Extended,
+    Module,
+    RubyString,
+    RubyObject,
+    registry as global_registry,
+)
+from rubymarshal.constants import (
+    TYPE_NIL,
+    TYPE_TRUE,
+    TYPE_FALSE,
+    TYPE_FIXNUM,
+    TYPE_IVAR,
+    TYPE_STRING,
+    TYPE_SYMBOL,
+    TYPE_ARRAY,
+    TYPE_HASH,
+    TYPE_FLOAT,
+    TYPE_BIGNUM,
+    TYPE_REGEXP,
+    TYPE_USRMARSHAL,
+    TYPE_SYMLINK,
+    TYPE_LINK,
+    TYPE_DATA,
+    TYPE_OBJECT,
+    TYPE_STRUCT,
+    TYPE_MODULE,
+    TYPE_CLASS,
+    TYPE_USERDEF,
+    TYPE_EXTENDED,
+)
 from rubymarshal.utils import read_ushort, read_sbyte, read_ubyte
 
-__author__ = 'Matthieu Gallet'
+__author__ = "Matthieu Gallet"
 
 
-class Reader(object):
-    def __init__(self, fd, usr_marshal_mapping=None, userdef_mapping=None):
+class Reader:
+    def __init__(self, fd, registry=None):
         self.symbols = []
         self.objects = []
         self.fd = fd
-        self.usr_marshal_mapping = usr_marshal_mapping or {}
-        self.userdef_mapping = userdef_mapping or {}
+        self.registry = registry or global_registry
 
-    def read(self, token=None, ivar=False):
+    def read(self, token=None):
         if token is None:
             token = self.fd.read(1)
         object_index = None
-        if token in (TYPE_CLASS, TYPE_MODULE, TYPE_FLOAT, TYPE_BIGNUM, TYPE_STRING, TYPE_REGEXP, TYPE_ARRAY, TYPE_HASH, TYPE_STRUCT, TYPE_OBJECT, TYPE_DATA, TYPE_USRMARSHAL):
+        if token in (
+            TYPE_IVAR,
+            # TYPE_EXTENDED, TYPE_UCLASS, ????
+            TYPE_CLASS,
+            TYPE_MODULE,
+            TYPE_FLOAT,
+            TYPE_BIGNUM,
+            TYPE_REGEXP,
+            TYPE_ARRAY,
+            TYPE_HASH,
+            TYPE_STRUCT,
+            TYPE_OBJECT,
+            TYPE_DATA,
+            TYPE_USRMARSHAL,
+        ):
             self.objects.append(None)
             object_index = len(self.objects)
         if token == TYPE_NIL:
@@ -35,36 +76,26 @@ class Reader(object):
             result = False
         elif token == TYPE_IVAR:
             sub_token = self.fd.read(1)
-            content = self.read(sub_token, ivar=True)
+            result = self.read(sub_token)
             flags = None
-            if sub_token != TYPE_STRING:
-                print(token,  sub_token, '-----')
             if sub_token == TYPE_REGEXP:
                 options = ord(self.fd.read(1))
                 flags = 0
                 if options & 1:
                     flags |= re.IGNORECASE
                 if options & 4:
-                    flags |= re.DOTALL
-            if sub_token in (TYPE_STRING, TYPE_REGEXP, TYPE_USERDEF):
-                encoding = 'latin1'
-                attr_count = self.read_long()
-                attrs = {}
-                for x in range(attr_count):
-                    attr_name = self.read()
-                    attr_value = self.read()
-                    if attr_name == Symbol('E') and attr_value is True:
-                        encoding = 'utf-8'
-                    elif attr_name == Symbol('encoding'):
-                        encoding = attr_value.decode('utf-8')
-                    attrs[attr_name] = attr_value
-                if sub_token in (TYPE_STRING, TYPE_REGEXP):
-                    content = content.decode(encoding)
-            else:
-                raise ValueError
+                    flags |= re.MULTILINE
+            attributes = self.read_attributes()
+            if sub_token in (TYPE_STRING, TYPE_REGEXP):
+                encoding = self._get_encoding(attributes)
+                result = result.decode(encoding)
+            # string instance attributes are discarded
+            if attributes and sub_token == TYPE_STRING:
+                result = RubyString(result, attributes)
             if sub_token == TYPE_REGEXP:
-                content = re.compile(content, flags)
-            result = content
+                result = re.compile(str(result), flags)
+            elif attributes:
+                result.set_attributes(attributes)
         elif token == TYPE_STRING:
             size = self.read_long()
             result = self.fd.read(size)
@@ -86,77 +117,124 @@ class Reader(object):
             result = result
         elif token == TYPE_FLOAT:
             size = self.read_long()
-            result = float(self.fd.read(size).decode('utf-8'))
+            result = float(self.fd.read(size).decode("utf-8"))
         elif token == TYPE_BIGNUM:
-            sign = 1 if self.fd.read(1) == b'+' else -1
+            sign = 1 if self.fd.read(1) == b"+" else -1
             num_elements = self.read_long()
             result = 0
             factor = 1
             for x in range(num_elements):
-                result += (self.read_short() * factor)
+                result += self.read_short() * factor
                 factor *= 2 ** 16
             result *= sign
         elif token == TYPE_REGEXP:
             size = self.read_long()
             result = self.fd.read(size)
         elif token == TYPE_USRMARSHAL:
-            class_name = self.read()
+            class_symbol = self.read()
+            if not isinstance(class_symbol, Symbol):
+                raise ValueError("invalid class name: %r" % class_symbol)
+            class_name = class_symbol.name
             attr_list = self.read()
-            cls = self.usr_marshal_mapping.get(class_name, UsrMarshal)
-            result = cls(class_name, attr_list)
+            python_class = self.registry.get(class_name, UsrMarshal)
+            if not issubclass(python_class, UsrMarshal):
+                raise ValueError(
+                    "invalid class mapping for %r: %r should be a subclass of %r."
+                    % (class_name, python_class, UsrMarshal)
+                )
+            result = python_class(class_name)
+            result.marshal_load(attr_list)
         elif token == TYPE_SYMLINK:
             result = self.read_symlink()
         elif token == TYPE_LINK:
             link_id = self.read_long()
             result = self.objects[link_id]
         elif token == TYPE_USERDEF:
-            class_name = self.read()
-            data = self.read(TYPE_STRING)
-            if not ivar:
-                data = loads(data)
-            result = UserDef(class_name, data)
-            print(result)
+            class_symbol = self.read()
+            private_data = self.read(TYPE_STRING)
+            if not isinstance(class_symbol, Symbol):
+                raise ValueError("invalid class name: %r" % class_symbol)
+            class_name = class_symbol.name
+            python_class = self.registry.get(class_name, UserDef)
+            if not issubclass(python_class, UserDef):
+                raise ValueError(
+                    "invalid class mapping for %r: %r should be a subclass of %r."
+                    % (class_name, python_class, UserDef)
+                )
+            result = python_class(class_name)
+            # noinspection PyProtectedMember
+            result._load(private_data)
         elif token == TYPE_MODULE:
-            module_name = self.read()
+            data = self.read(TYPE_STRING)
+            module_name = data.decode()
             result = Module(module_name, None)
         elif token == TYPE_OBJECT:
-            class_name = self.read()
-            data = self.read(TYPE_STRING)
-            # attr_count = self.read_long()
-            # # noinspection PyUnusedLocal
-            # attrs = {self.read(): self.read() for x in range(attr_count)}
-            if not ivar:
-                data = self.read()
-            result = Object(class_name, data)
-            print(result)
+            class_symbol = self.read()
+            assert isinstance(class_symbol, Symbol)
+            class_name = class_symbol.name
+            python_class = self.registry.get(class_name, RubyObject)
+            if not issubclass(python_class, RubyObject):
+                raise ValueError(
+                    "invalid class mapping for %r: %r should be a subclass of %r."
+                    % (class_name, python_class, RubyObject)
+                )
+            attributes = self.read_attributes()
+            result = python_class(class_name, attributes)
         elif token == TYPE_EXTENDED:
             class_name = self.read(TYPE_STRING)
-            print(class_name)
             result = Extended(class_name, None)
+        elif token == TYPE_CLASS:
+            data = self.read(TYPE_STRING)
+            class_name = data.decode()
+            if class_name in self.registry:
+                result = self.registry[class_name]
+            else:
+                result = type(
+                    class_name.rpartition(":")[2],
+                    (RubyObject,),
+                    {"ruby_class_name": class_name},
+                )
         else:
-            raise ValueError('token %s is not recognized' % token)
+            raise ValueError("token %s is not recognized" % token)
         if object_index is not None:
             self.objects[object_index - 1] = result
-        # print('end', result, object_index, self.objects)
         return result
+
+    @staticmethod
+    def _get_encoding(attrs):
+        encoding = "latin1"
+        if attrs.get("E") is True:
+            encoding = "utf-8"
+        elif "encoding" in attrs:
+            encoding = attrs["encoding"].decode()
+        return encoding
+
+    def read_attributes(self):
+        attr_count = self.read_long()
+        attrs = {}
+        for x in range(attr_count):
+            attr_name = self.read()
+            attr_value = self.read()
+            attrs[attr_name.name] = attr_value
+        return attrs
 
     def read_short(self):
         return read_ushort(self.fd)
 
     def read_long(self):
-        l = read_sbyte(self.fd)
-        if l == 0:
+        length = read_sbyte(self.fd)
+        if length == 0:
             return 0
-        if 5 < l < 128:
-            return l - 5
-        elif -129 < l < -5:
-            return l + 5
+        if 5 < length < 128:
+            return length - 5
+        elif -129 < length < -5:
+            return length + 5
         result = 0
         factor = 1
-        for s in range(abs(l)):
-            result += (read_ubyte(self.fd) * factor)
+        for s in range(abs(length)):
+            result += read_ubyte(self.fd) * factor
             factor *= 256
-        if l < 0:
+        if length < 0:
             result = result - factor
         return result
 
@@ -166,12 +244,14 @@ class Reader(object):
             token = self.fd.read(1)
             if token == TYPE_IVAR:
                 ivar = 1
+                continue
             elif token == TYPE_SYMBOL:
                 return self.read_symreal()
             elif token == TYPE_SYMLINK:
                 if ivar:
-                    raise ValueError('dump format error (symlink with encoding)')
+                    raise ValueError("dump format error (symlink with encoding)")
                 return self.read_symlink()
+            raise ValueError("error while reading symbol with token %r" % token)
 
     def read_symlink(self):
         symlink_id = self.read_long()
@@ -180,17 +260,18 @@ class Reader(object):
     def read_symreal(self):
         size = self.read_long()
         result = self.fd.read(size)
-        result = Symbol(result.decode('utf-8'))
+        result = Symbol(result.decode("utf-8"))
         self.symbols.append(result)
         return result
 
 
-def load(fd):
-    assert fd.read(1) == b'\x04'
-    assert fd.read(1) == b'\x08'
-    loader = Reader(fd)
+def load(fd, registry=None):
+    assert fd.read(1) == b"\x04"
+    assert fd.read(1) == b"\x08"
+
+    loader = Reader(fd, registry=registry)
     return loader.read()
 
 
-def loads(byte_text):
-    return load(io.BytesIO(byte_text))
+def loads(byte_text, registry=None):
+    return load(io.BytesIO(byte_text), registry=registry)
