@@ -136,7 +136,7 @@ class Reader:
             factor = 1
             for x in range(num_elements):
                 result += self.read_short() * factor
-                factor *= 2 ** 16
+                factor *= 2**16
             result *= sign
         elif token == TYPE_REGEXP:
             size = self.read_long()
@@ -282,8 +282,10 @@ class Reader:
 
 
 def load(fd, registry=None):
-    assert fd.read(1) == b"\x04"
-    assert fd.read(1) == b"\x08"
+    if fd.read(1) != b"\x04":
+        raise ValueError(r'Expected token \x04')
+    if fd.read(1) != b"\x08":
+        raise ValueError(r'Expected token \x08')
 
     loader = Reader(fd, registry=registry)
     return loader.read()

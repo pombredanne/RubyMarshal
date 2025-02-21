@@ -5,7 +5,6 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from rubymarshal.classes import RubyObject, RubyString, Symbol
-from rubymarshal.constants import TYPE_SYMBOL, TYPE_SYMLINK
 from rubymarshal.reader import Reader
 from rubymarshal.writer import Writer
 
@@ -27,7 +26,7 @@ def test_rubyobject_repr(name, attributes):
 
 @given(TEXT, ATTRIBUTES, TEXT, ATTRIBUTES)
 def test_rubyobject_hash(name1, attributes1, name2, attributes2):
-    assume(hash(attributes1) != hash(attributes2))
+    assume(hash(attributes1) != hash(attributes2) or name1 != name2)
     obj1 = RubyObject(name1, attributes1)
     obj2 = RubyObject(name2, attributes2)
     obj3 = RubyObject(name1, attributes1)
